@@ -304,12 +304,13 @@ function replaceImageInWorkflow(workflow, filename) {
 async function waitForResult(baseURL, promptId, timeoutMs=120000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
+    // 首先，检查历史记录中是否已有结果
     const resp = await fetch(`${baseURL}/history/${promptId}`);
     if (resp.ok) {
       const data = await resp.json();
       if (data && data[promptId] && data[promptId].outputs) {
         const outputs = data[promptId].outputs;
-        // try to find first image
+        // 尝试找到第一个图像输出
         for (const k of Object.keys(outputs)) {
           const o = outputs[k];
           const imgs = (o && o.images) || [];
@@ -323,6 +324,26 @@ async function waitForResult(baseURL, promptId, timeoutMs=120000) {
         }
       }
     }
+
+    // 如果还没有结果，则更新队列信息
+    try {
+      const queueResp = await fetch(`${baseURL}/queue`);
+      if (queueResp.ok) {
+        const queueData = await queueResp.json();
+        const pendingCount = (queueData.queue_pending || []).length;
+        const runningCount = (queueData.queue_running || []).length;
+        const totalInQueue = pendingCount + runningCount;
+        if (totalInQueue > 0) {
+          setStatus(`等待 ComfyUI 处理… (队列: ${totalInQueue})`);
+        } else {
+          setStatus("等待 ComfyUI 处理…");
+        }
+      }
+    } catch(e) {
+      // 如果队列检查失败，只需保持上一个消息，不要中断轮询
+      console.warn("无法获取 ComfyUI 队列状态。", e);
+    }
+
     await new Promise(r => setTimeout(r, 1200));
   }
   throw new Error("等待 ComfyUI 结果超时");
@@ -352,7 +373,6 @@ async function runComfyWorkflow(baseURL, fileEntry, dstName) {
   const promptId = j.prompt_id || j.promptId || j.id;
   if (!promptId) throw new Error("未获得 prompt_id");
 
-  setStatus("等待 ComfyUI 处理…");
   const bytes = await waitForResult(baseURL, promptId);
   setStatus("收到结果");
   return bytes;
