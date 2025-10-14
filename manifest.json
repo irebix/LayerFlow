@@ -1,0 +1,32 @@
+{
+  "manifestVersion": 5,
+  "id": "com.comfyui.layerflow",
+  "name": {
+    "default": "浮图"
+  },
+  "version": "1.0.1",
+  "main": "index.html",
+  "host": {
+    "app": "PS",
+    "minVersion": "25.0.0"
+  },
+  "entrypoints": [
+    {
+      "type": "panel",
+      "id": "layerflowPanel",
+      "label": {
+        "default": "浮图"
+      },
+      "minimumSize": {
+        "width": 220,
+        "height": 120
+      }
+    }
+  ],
+  "requiredPermissions": {
+    "network": {
+      "domains": "all"
+    },
+    "localFileSystem": "plugin"
+  }
+}
