@@ -17,18 +17,6 @@
       "title": "BiRefNet 去除背景 (RMBG)"
     }
   },
-  "2": {
-    "inputs": {
-      "images": [
-        "5",
-        0
-      ]
-    },
-    "class_type": "PreviewImage",
-    "_meta": {
-      "title": "预览图像"
-    }
-  },
   "4": {
     "inputs": {
       "image": "placeholder.png"
@@ -52,6 +40,30 @@
     "class_type": "JoinImageWithAlpha",
     "_meta": {
       "title": "合并图像Alpha"
+    }
+  },
+  "6": {
+    "inputs": {
+      "image": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "easy imageToBase64",
+    "_meta": {
+      "title": "图像到Base64"
+    }
+  },
+  "7": {
+    "inputs": {
+      "anything": [
+        "6",
+        0
+      ]
+    },
+    "class_type": "easy showAnything",
+    "_meta": {
+      "title": "展示任何"
     }
   }
 }

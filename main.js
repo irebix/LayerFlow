@@ -160,10 +160,10 @@ async function exportLayerViaImagingPng(targetLayer) {
   return { fileEntry, anchor };
 }
 
-/** 命名：原名_rmbg / _rmbg_2 / _rmbg_3 ... **/
+/** 命名：原名_futu / _futu_2 / _futu_3 ... **/
 function computeNextRmbgName(baseName, siblingLayers) {
-  const m = (baseName||'').match(/^(.*?)(?:_rmbg(?:_(\d+))?)?$/i); const stem = (m && m[1].length) ? m[1] : baseName;
-  const tag = stem + '_rmbg'; let maxN = 0; const re = new RegExp('^' + tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?:_(\\d+))?$', 'i');
+  const m = (baseName||'').match(/^(.*?)(?:_futu(?:_(\d+))?)?$/i); const stem = (m && m[1].length) ? m[1] : baseName;
+  const tag = stem + '_futu'; let maxN = 0; const re = new RegExp('^' + tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?:_(\\d+))?$', 'i');
   try { for (const l of (siblingLayers||[])) { const mm = re.exec(l.name||''); if (mm) { const n = mm[1] ? parseInt(mm[1],10) : 1; if (!isNaN(n) && n > maxN) maxN = n; } } } catch (_) {}
   if (maxN <= 0) return tag; if (maxN === 1) return tag + '_2'; return tag + '_' + (maxN + 1);
 }
@@ -178,7 +178,7 @@ async function getLayerInputFilePreferImaging(targetLayer) {
 /** ---------- Insert result above (translate-only), then overwrite or name; rasterize if smart object ---------- **/
 async function insertAndAlignResult(targetLayer, bytes, replaceOriginal, anchor) {
   const tmp = await fs.getTemporaryFolder();
-  const file = await tmp.createFile("ps_rmbg_result.png", { overwrite: true });
+  const file = await tmp.createFile("ps_futu_result.png", { overwrite: true });
   await file.write(bytes, { format: uxp.storage.formats.binary });
 
   await core.executeAsModal(async () => {
@@ -249,7 +249,7 @@ async function insertAndAlignResult(targetLayer, bytes, replaceOriginal, anchor)
       try { placed.name = originalName; } catch (_) {}
       try { await targetLayer.delete(); } catch (_) {}
     } else {
-      // 命名：原名_rmbg / _2 / _3 ...
+      // 命名：原名_futu / _2 / _3 ...
       try {
         const parent = targetLayer && targetLayer.parent;
         const siblings = parent ? (parent.layers || []) : (doc.layers || []);
@@ -310,16 +310,20 @@ async function waitForResult(baseURL, promptId, timeoutMs=120000) {
       const data = await resp.json();
       if (data && data[promptId] && data[promptId].outputs) {
         const outputs = data[promptId].outputs;
-        // 尝试找到第一个图像输出
+        // 尝试找到第一个 text 输出 
         for (const k of Object.keys(outputs)) {
-          const o = outputs[k];
-          const imgs = (o && o.images) || [];
-          if (imgs.length) {
-            const img = imgs[0];
-            const url = `${baseURL}/view?filename=${encodeURIComponent(img.filename)}&subfolder=${encodeURIComponent(img.subfolder || "")}&type=${encodeURIComponent(img.type || "output")}`;
-            const resImg = await fetch(url);
-            const buf = await resImg.arrayBuffer();
-            return new Uint8Array(buf);
+          const nodeOutput = outputs[k];
+          
+          // 根据我们从API获取的JSON，输出字段是 "text"，并且它是一个数组
+          if (nodeOutput && nodeOutput.text && Array.isArray(nodeOutput.text) && nodeOutput.text.length > 0) {
+            const base64Data = nodeOutput.text[0]; // 获取数组中的第一个元素
+            if (base64Data) {
+              // 使用文件中已有的工具函数将 Base64 字符串解码为 ArrayBuffer
+              const buffer = base64ToArrayBuffer(base64Data);
+              
+              // 返回 Uint8Array，与旧代码的返回类型保持一致，以便后续流程使用
+              return new Uint8Array(buffer);
+            }
           }
         }
       }
