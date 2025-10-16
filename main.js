@@ -161,6 +161,32 @@ function base64ToArrayBuffer(b64) {
   for (let i=0;i<len;i++) bytes[i] = binary.charCodeAt(i); return bytes.buffer;
 }
 
+/** ---------- One-step history helper (单一撤回步骤) ---------- **/
+async function withSingleHistoryState(historyName, work) {
+  return core.executeAsModal(
+    async (executionContext) => {
+      const { hostControl } = executionContext;
+      const doc = app.activeDocument;
+      const suspension = await hostControl.suspendHistory({
+        documentID: doc.id,
+        name: historyName
+      });
+
+      try {
+        const r = await work();
+        // 提交为单一历史项
+        await hostControl.resumeHistory(suspension, true);
+        return r;
+      } catch (e) {
+        // 出错则回滚，不产生历史记录项
+        try { await hostControl.resumeHistory(suspension, false); } catch(_) {}
+        throw e;
+      }
+    },
+    { commandName: historyName }
+  );
+}
+
 /** ---------- Imaging path: getPixels -> encodeImageData (PNG, no UI) ---------- **/
 async function exportLayerViaImagingPng(targetLayer) {
   const { imaging } = require('photoshop'); const doc = app.activeDocument;
@@ -179,6 +205,29 @@ async function exportLayerViaImagingPng(targetLayer) {
   return { fileEntry, anchor };
 }
 
+/** ---------- 回退方案：用可视合成导出目标图层区域 PNG ---------- **/
+async function exportLayerBoundsToPNG(targetLayer) {
+  const tmp = await fs.getTemporaryFolder();
+  const fileEntry = await tmp.createFile('ps_remove_bg_input.png', { overwrite: true });
+
+  // 只显示目标图层（及祖先），导出合成
+  const restore = await isolateOnlyTargetVisible(targetLayer);
+  try {
+    await saveVisibleCompositeToPNG(fileEntry);
+  } finally {
+    try { await restore(); } catch(_) {}
+  }
+
+  const b = targetLayer.boundsNoEffects || targetLayer.bounds;
+  const anchor = {
+    left: Number(b.left),
+    top: Number(b.top),
+    width: Math.max(1, Number(b.right - b.left)),
+    height: Math.max(1, Number(b.bottom - b.top))
+  };
+  return { fileEntry, anchor };
+}
+
 /** 命名：原名_futu / _futu_2 / _futu_3 ... **/
 function computeNextRmbgName(baseName, siblingLayers) {
   const m = (baseName||'').match(/^(.*?)(?:_futu(?:_(\d+))?)?$/i); const stem = (m && m[1].length) ? m[1] : baseName;
@@ -192,7 +241,6 @@ async function getLayerInputFilePreferImaging(targetLayer) {
   try { const r = await exportLayerViaImagingPng(targetLayer); r.via='IMAGING'; return r; }
   catch (e) { const r2 = await exportLayerBoundsToPNG(targetLayer); r2.via='TMP'; return r2; }
 }
-/** ---------- Insert result above (new: translate-only + overwrite) ---------- **/
 
 /** ---------- Insert result above (translate-only), then overwrite or name; rasterize if smart object ---------- **/
 async function insertAndAlignResult(targetLayer, bytes, replaceOriginal, anchor) {
@@ -200,7 +248,9 @@ async function insertAndAlignResult(targetLayer, bytes, replaceOriginal, anchor)
   const file = await tmp.createFile("ps_futu_result.png", { overwrite: true });
   await file.write(bytes, { format: uxp.storage.formats.binary });
 
-  await core.executeAsModal(async () => {
+  const histName = replaceOriginal ? "LayerFlow：抠图（覆写）" : "LayerFlow：抠图";
+
+  await withSingleHistoryState(histName, async () => {
     const token = await fs.createSessionToken(file);
     await batchPlay([{
       _obj: "placeEvent",
@@ -222,25 +272,20 @@ async function insertAndAlignResult(targetLayer, bytes, replaceOriginal, anchor)
       placed.move(targetLayer, ElementPlacement.PLACEBEFORE);
     } catch (_) {}
 
-    // [MODIFIED ALIGNMENT LOGIC]
-    // The old logic aligned pixel bounds. The new logic aligns the layer's frame.
-    // It assumes Photoshop centers the placed image, then calculates the translation
-    // needed to move the frame to the original anchor position.
+    // —— 对齐逻辑：按图层框架对齐到原 anchor —— 
     try {
       const docWidth = doc.width;
       const docHeight = doc.height;
       const layerWidth = anchor.width;
       const layerHeight = anchor.height;
 
-      // Calculate the top-left position of the centered layer
+      // 居中位置
       const centeredLeft = (docWidth / 2) - (layerWidth / 2);
       const centeredTop = (docHeight / 2) - (layerHeight / 2);
 
-      // Get the target top-left position from the anchor
       const targetLeft = (anchor && anchor.left) ? Number(anchor.left) : 0;
       const targetTop = (anchor && anchor.top) ? Number(anchor.top) : 0;
 
-      // Calculate the delta and translate the layer
       const dx = targetLeft - centeredLeft;
       const dy = targetTop - centeredTop;
 
@@ -251,7 +296,7 @@ async function insertAndAlignResult(targetLayer, bytes, replaceOriginal, anchor)
       console.error("LayerFlow alignment failed:", e);
     }
 
-    //栅格化：将放置层转为像素层（去除智能对象属性）
+    // 栅格化：将放置层转为像素层（去除智能对象属性）
     try {
       const { RasterizeType } = require('photoshop').constants;
       await placed.rasterize(RasterizeType.ENTIRELAYER);
@@ -276,7 +321,7 @@ async function insertAndAlignResult(targetLayer, bytes, replaceOriginal, anchor)
         placed.name = nextName;
       } catch (_) {}
     }
-  }, { commandName: "插入抠图结果并对齐" });
+  });
 }
 
 /** ---------- ComfyUI workflow helpers ---------- **/
@@ -288,10 +333,8 @@ async function uploadToComfy(baseURL, fileEntry, dstName) {
   form.append("image", blob, dstName);
   // ComfyUI: POST /upload/image
   const resp = await http(baseURL + "/upload/image", { method: "POST", body: form });
-  // --- MODIFICATION START ---
-  // Return the JSON response from ComfyUI
+  // 返回 JSON（包含 name / subfolder 等）
   return await resp.json();
-  // --- MODIFICATION END ---
 }
 
 async function loadWorkflowJSON() {
@@ -337,7 +380,6 @@ async function waitForResult(baseURL, promptId, timeoutMs=120000) {
           if (base64Data) {
             // 使用文件中已有的工具函数将 Base64 字符串解码为 ArrayBuffer
             const buffer = base64ToArrayBuffer(base64Data);
-            
             // 返回 Uint8Array，与旧代码的返回类型保持一致，以便后续流程使用
             return new Uint8Array(buffer);
           }
@@ -368,22 +410,18 @@ async function waitForResult(baseURL, promptId, timeoutMs=120000) {
 }
 
 async function runComfyWorkflow(baseURL, fileEntry, dstName) {
-  // --- MODIFICATION START ---
   setStatus("上传输入到 ComfyUI…");
   const uploadResult = await uploadToComfy(baseURL, fileEntry, dstName);
   
-  // Construct the correct filename, including the subfolder if it exists
+  // 构造正确的文件名（含子目录）
   let filename = uploadResult.name;
   if (uploadResult.subfolder) {
-    // ComfyUI uses forward slashes for paths
     filename = uploadResult.subfolder.replace(/\\/g, '/') + "/" + filename;
   }
   
   setStatus("提交工作流…");
   const wf = await loadWorkflowJSON();
-  // Use the correct filename (with subfolder) to replace in the workflow
   const wf2 = replaceImageInWorkflow(wf, filename);
-  // --- MODIFICATION END ---
   
   const resp = await http(baseURL + "/prompt", { 
       method: "POST", 
@@ -411,17 +449,26 @@ function setupUI() {
   });
 
   removeBtn.addEventListener("click", async () => {
-  showResultTip(""); setProgress(3, "准备中…"); removeBtn.disabled = true;
-  try {
-    const doc = app.activeDocument; if (!doc) throw new Error("没有打开的文档");
-    const [targetLayer] = doc.activeLayers || []; if (!targetLayer) throw new Error("未选择图层");
-    const baseURL = await getComfyBaseURL();
-    setProgress(12, "获取图层像素…"); const { fileEntry, anchor } = await getLayerInputFilePreferImaging(targetLayer);
-    setProgress(45, "上传到 ComfyUI 并执行…"); const resultBytes = await runComfyWorkflow(baseURL, fileEntry, 'ps_remove_bg_input.png');
-    setProgress(90, "回贴结果并对齐…"); await insertAndAlignResult(targetLayer, resultBytes, !!(replaceCheck && replaceCheck.checked), anchor);
-    endProgress("完成"); showResultTip("已插入抠图结果");
-  } catch (err) {
-    console.error("[浮图] 错误：", err); endProgress("出错"); showResultTip((err && err.message) ? err.message : String(err));
-  } finally { removeBtn.disabled = false; }
-});
+    showResultTip(""); setProgress(3, "准备中…"); removeBtn.disabled = true;
+    try {
+      const doc = app.activeDocument; if (!doc) throw new Error("没有打开的文档");
+      const [targetLayer] = doc.activeLayers || []; if (!targetLayer) throw new Error("未选择图层");
+      const baseURL = await getComfyBaseURL();
+
+      setProgress(12, "获取图层像素…");
+      const { fileEntry, anchor } = await getLayerInputFilePreferImaging(targetLayer);
+
+      setProgress(45, "上传到 ComfyUI 并执行…");
+      const resultBytes = await runComfyWorkflow(baseURL, fileEntry, 'ps_remove_bg_input.png');
+
+      setProgress(90, "回贴结果并对齐…");
+      await insertAndAlignResult(targetLayer, resultBytes, !!(replaceCheck && replaceCheck.checked), anchor);
+
+      endProgress("完成"); showResultTip("已插入抠图结果");
+    } catch (err) {
+      console.error("[浮图] 错误：", err);
+      endProgress("出错");
+      showResultTip((err && err.message) ? err.message : String(err));
+    } finally { removeBtn.disabled = false; }
+  });
 }
