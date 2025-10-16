@@ -6,6 +6,25 @@ const batchPlay = action.batchPlay;
 const fs = uxp.storage.localFileSystem;
 const { entrypoints } = uxp;
 
+/** ---------- Robust HTTP client with timeout and retry ---------- **/
+async function http(url, opts = {}, tries = 3, timeoutMs = 15000) {
+  for (let i = 0; i < tries; i++) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(new Error('timeout')), timeoutMs);
+    try {
+      const resp = await fetch(url, Object.assign({}, opts, { signal: ctrl.signal }));
+      clearTimeout(t);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      return resp;
+    } catch (e) {
+      clearTimeout(t);
+      // 最后一轮还失败就抛出；否则指数退避
+      if (i === tries - 1) throw e;
+      await new Promise(r => setTimeout(r, 300 * (2 ** i) + Math.random() * 150));
+    }
+  }
+}
+
 /** ---------- Panel mount (Manifest v5) ---------- **/
 function mountToPanelRoot(root) {
   // Move body children into panel root so Spectrum components render correctly
@@ -268,8 +287,7 @@ async function uploadToComfy(baseURL, fileEntry, dstName) {
   const form = new FormData();
   form.append("image", blob, dstName);
   // ComfyUI: POST /upload/image
-  const resp = await fetch(baseURL + "/upload/image", { method: "POST", body: form });
-  if (!resp.ok) throw new Error("上传到 ComfyUI 失败: " + resp.status);
+  const resp = await http(baseURL + "/upload/image", { method: "POST", body: form });
   // --- MODIFICATION START ---
   // Return the JSON response from ComfyUI
   return await resp.json();
@@ -305,21 +323,23 @@ async function waitForResult(baseURL, promptId, timeoutMs=120000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     // 首先，检查历史记录中是否已有结果
-    const resp = await fetch(`${baseURL}/history/${promptId}`);
-    if (resp.ok) {
-      const data = await resp.json();
-      if (data && data[promptId] && data[promptId].outputs) {
-        const outputs = data[promptId].outputs;
-        // 尝试找到第一个图像输出
-        for (const k of Object.keys(outputs)) {
-          const o = outputs[k];
-          const imgs = (o && o.images) || [];
-          if (imgs.length) {
-            const img = imgs[0];
-            const url = `${baseURL}/view?filename=${encodeURIComponent(img.filename)}&subfolder=${encodeURIComponent(img.subfolder || "")}&type=${encodeURIComponent(img.type || "output")}`;
-            const resImg = await fetch(url);
-            const buf = await resImg.arrayBuffer();
-            return new Uint8Array(buf);
+    const resp = await http(`${baseURL}/history/${promptId}`, {}, 2, 10000);
+    const data = await resp.json();
+    if (data && data[promptId] && data[promptId].outputs) {
+      const outputs = data[promptId].outputs;
+      // 尝试找到第一个 text 输出 
+      for (const k of Object.keys(outputs)) {
+        const nodeOutput = outputs[k];
+        
+        // 根据我们从API获取的JSON，输出字段是 "text"，并且它是一个数组
+        if (nodeOutput && nodeOutput.text && Array.isArray(nodeOutput.text) && nodeOutput.text.length > 0) {
+          const base64Data = nodeOutput.text[0]; // 获取数组中的第一个元素
+          if (base64Data) {
+            // 使用文件中已有的工具函数将 Base64 字符串解码为 ArrayBuffer
+            const buffer = base64ToArrayBuffer(base64Data);
+            
+            // 返回 Uint8Array，与旧代码的返回类型保持一致，以便后续流程使用
+            return new Uint8Array(buffer);
           }
         }
       }
@@ -327,17 +347,15 @@ async function waitForResult(baseURL, promptId, timeoutMs=120000) {
 
     // 如果还没有结果，则更新队列信息
     try {
-      const queueResp = await fetch(`${baseURL}/queue`);
-      if (queueResp.ok) {
-        const queueData = await queueResp.json();
-        const pendingCount = (queueData.queue_pending || []).length;
-        const runningCount = (queueData.queue_running || []).length;
-        const totalInQueue = pendingCount + runningCount;
-        if (totalInQueue > 0) {
-          setStatus(`等待 ComfyUI 处理… (队列: ${totalInQueue})`);
-        } else {
-          setStatus("等待 ComfyUI 处理…");
-        }
+      const queueResp = await http(`${baseURL}/queue`, {}, 1, 5000);
+      const queueData = await queueResp.json();
+      const pendingCount = (queueData.queue_pending || []).length;
+      const runningCount = (queueData.queue_running || []).length;
+      const totalInQueue = pendingCount + runningCount;
+      if (totalInQueue > 0) {
+        setStatus(`等待 ComfyUI 处理… (队列: ${totalInQueue})`);
+      } else {
+        setStatus("等待 ComfyUI 处理…");
       }
     } catch(e) {
       // 如果队列检查失败，只需保持上一个消息，不要中断轮询
@@ -367,8 +385,11 @@ async function runComfyWorkflow(baseURL, fileEntry, dstName) {
   const wf2 = replaceImageInWorkflow(wf, filename);
   // --- MODIFICATION END ---
   
-  const resp = await fetch(baseURL + "/prompt", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ prompt: wf2 })});
-  if (!resp.ok) throw new Error("提交工作流失败: " + resp.status);
+  const resp = await http(baseURL + "/prompt", { 
+      method: "POST", 
+      headers: {"Content-Type":"application/json"}, 
+      body: JSON.stringify({ prompt: wf2 })
+  });
   const j = await resp.json();
   const promptId = j.prompt_id || j.promptId || j.id;
   if (!promptId) throw new Error("未获得 prompt_id");
