@@ -327,23 +327,19 @@ async function waitForResult(baseURL, promptId, timeoutMs=120000) {
     const data = await resp.json();
     if (data && data[promptId] && data[promptId].outputs) {
       const outputs = data[promptId].outputs;
-      // 尝试找到第一个 text 输出 
-      for (const k of Object.keys(outputs)) {
-        const nodeOutput = outputs[k];
-        
-        // 根据我们从API获取的JSON，输出字段是 "text"，并且它是一个数组
-        if (nodeOutput && nodeOutput.text && Array.isArray(nodeOutput.text) && nodeOutput.text.length > 0) {
-          const base64Data = nodeOutput.text[0]; // 获取数组中的第一个元素
-          if (base64Data) {
-            // 使用文件中已有的工具函数将 Base64 字符串解码为 ArrayBuffer
-            const buffer = base64ToArrayBuffer(base64Data);
-            
-            // 返回 Uint8Array，与旧代码的返回类型保持一致，以便后续流程使用
-            return new Uint8Array(buffer);
+        // 尝试找到第一个图像输出
+        for (const k of Object.keys(outputs)) {
+          const o = outputs[k];
+          const imgs = (o && o.images) || [];
+          if (imgs.length) {
+            const img = imgs[0];
+            const url = `${baseURL}/view?filename=${encodeURIComponent(img.filename)}&subfolder=${encodeURIComponent(img.subfolder || "")}&type=${encodeURIComponent(img.type || "output")}`;
+            const resImg = await fetch(url);
+            const buf = await resImg.arrayBuffer();
+            return new Uint8Array(buf);
           }
         }
       }
-    }
 
     // 如果还没有结果，则更新队列信息
     try {
