@@ -6,6 +6,66 @@ const batchPlay = action.batchPlay;
 const fs = uxp.storage.localFileSystem;
 const { entrypoints } = uxp;
 
+/** 
+ * ---------- 库加载逻辑 (Shim) ---------- 
+ * 这里我们将 Pako 适配给 UPNG 使用，解决 "UZIP not found" 问题
+ */
+let UPNG = null;
+try {
+  // 1. 加载压缩核心库 pako
+  const pako = require('./lib/pako.min.js');
+  global.pako = pako; // UPNG.js 需要直接访问 pako
+
+  // 2. 创建 UPNG 所需的 UZIP 接口 (UPNG 默认依赖 UZIP.js，我们用 pako 模拟它)
+  const UZIP = {
+    deflateRaw: (data) => {
+      // 修改点 1：使用 strategy: 1 (Z_FILTERED)
+      // 这专门针对 PNG 这种经过滤镜处理的数据进行优化，通常比默认模式更小
+      return pako.deflate(data, {
+        level: 6,
+        raw: true,
+        strategy: 1
+      });
+    }
+  };
+
+  // 3. 将 UZIP 挂载到全局，因为 UPNG.js 可能会在全局查找它
+  global.UZIP = UZIP;
+
+  // 4. 加载并修复 UPNG
+  UPNG = require('./lib/UPNG.js');
+
+} catch (e) {
+  console.warn("依赖加载失败:", e);
+  console.warn("请确保 pako.min.js 和 UPNG.js (已添加 module.exports) 都在插件根目录。");
+}
+
+/** 
+ * 使用 UPNG + Pako 进行高压缩比无损编码 
+ * 结果体积：约 300KB - 800KB
+ */
+function encodeImageViaUPNG(pixelData, width, height) {
+  if (!UPNG || typeof UPNG.encode !== 'function') {
+    throw new Error("UPNG 库未正确加载。请检查是否下载了 pako.min.js 并修改了 UPNG.js。");
+  }
+
+  // 修改点 2：清洗透明区域的 RGB 噪点
+  // 这一步对于抠图场景至关重要，能大幅减小体积
+  const len = pixelData.byteLength;
+  for (let i = 0; i < len; i += 4) {
+    // 如果 Alpha 通道 (i+3) 是 0 (完全透明)
+    if (pixelData[i + 3] === 0) {
+      pixelData[i] = 0;     // R 清零
+      pixelData[i + 1] = 0; // G 清零
+      pixelData[i + 2] = 0; // B 清零
+    }
+  }
+
+  // 参数0：无损色彩；参数[]：禁止色彩量化(保持原始颜色)
+  const pngBuffer = UPNG.encode([pixelData], width, height, 0);
+  return pngBuffer;
+}
+
 /** ---------- Robust HTTP client with timeout and retry ---------- **/
 async function http(url, opts = {}, tries = 3, timeoutMs = 15000) {
   for (let i = 0; i < tries; i++) {
@@ -53,9 +113,9 @@ function setProgress(v, msg) {
     if (typeof v === 'number') { bar.removeAttribute('indeterminate'); bar.value = Math.max(0, Math.min(100, v)); }
     else { bar.setAttribute('indeterminate', ''); }
     bar.style.display = 'block';
-    try { bar.scrollIntoView({ block: 'nearest' }); } catch (_) {}
+    try { bar.scrollIntoView({ block: 'nearest' }); } catch (_) { }
   }
-  if (btn && typeof v === 'number') { btn.textContent = `处理中 ${v|0}%…`; btn.disabled = true; }
+  if (btn && typeof v === 'number') { btn.textContent = `处理中 ${v | 0}%…`; btn.disabled = true; }
   if (typeof msg === 'string') setStatus(msg);
 }
 function endProgress(msg) {
@@ -94,7 +154,7 @@ async function getComfyBaseURL() {
       const json = JSON.parse(await cfg.read());
       if (json && json.comfyui_url) url = json.comfyui_url;
     }
-  } catch (e) {}
+  } catch (e) { }
   _cachedBaseURL = String(url).replace(/\/+$/, "");
   return _cachedBaseURL;
 }
@@ -120,45 +180,48 @@ async function isolateOnlyTargetVisible(targetLayer) {
 
   // Hide all
   for (const it of all) {
-    try { it.layer.visible = false; } catch (_) {}
+    try { it.layer.visible = false; } catch (_) { }
   }
   // Show target and all its ancestors
   let node = targetLayer;
   while (node) {
-    try { node.visible = true; } catch (_) {}
+    try { node.visible = true; } catch (_) { }
     node = node.parent;
   }
 
   // Return restore function
   return () => {
     for (const it of all) {
-      try { it.layer.visible = it.visible; } catch (_) {}
+      try { it.layer.visible = it.visible; } catch (_) { }
     }
   };
 }
 
-/** ---------- Save current visible composite to PNG ---------- **/
+/** ---------- 修复版：Save current visible composite to PNG ---------- **/
 async function saveVisibleCompositeToPNG(outFileEntry) {
   const token = await fs.createSessionToken(outFileEntry);
   const doc = app.activeDocument;
   const docId = doc._id || doc.id;
 
-  await batchPlay([{
-    _obj: "save",
-    as: { _obj: "PNGFormat" },
-    in: { _path: token, _kind: "local" },
-    copy: true,
-    lowerCase: true,
-    documentID: docId,
-    _options: { dialogOptions: "dontDisplay" }
-  }], { synchronousExecution: true, modalBehavior: "execute" });
+  // 关键修复：必须包裹在 executeAsModal 中
+  await core.executeAsModal(async () => {
+    await batchPlay([{
+      _obj: "save",
+      as: { _obj: "PNGFormat", method: { _enum: "PNGMethod", _value: "quick" } },
+      in: { _path: token, _kind: "local" },
+      copy: true,
+      lowerCase: true,
+      documentID: docId,
+      _options: { dialogOptions: "dontDisplay" }
+    }], { synchronousExecution: true });
+  }, { commandName: "LayerFlow: 保存临时文件" });
 }
 
 
 /** ---------- base64 -> ArrayBuffer helper ---------- **/
 function base64ToArrayBuffer(b64) {
   const binary = atob(b64); const len = binary.length; const bytes = new Uint8Array(len);
-  for (let i=0;i<len;i++) bytes[i] = binary.charCodeAt(i); return bytes.buffer;
+  for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i); return bytes.buffer;
 }
 
 /** ---------- One-step history helper (单一撤回步骤) ---------- **/
@@ -179,7 +242,7 @@ async function withSingleHistoryState(historyName, work) {
         return r;
       } catch (e) {
         // 出错则回滚，不产生历史记录项
-        try { await hostControl.resumeHistory(suspension, false); } catch(_) {}
+        try { await hostControl.resumeHistory(suspension, false); } catch (_) { }
         throw e;
       }
     },
@@ -188,20 +251,43 @@ async function withSingleHistoryState(historyName, work) {
 }
 
 /** ---------- Imaging path: getPixels -> encodeImageData (PNG, no UI) ---------- **/
+/** ---------- Imaging path: getPixels -> UPNG encode (PNG, no UI) ---------- **/
 async function exportLayerViaImagingPng(targetLayer) {
   const { imaging } = require('photoshop'); const doc = app.activeDocument;
   if (!doc) throw new Error('没有打开的文档'); const id = targetLayer && (targetLayer._id || targetLayer.id);
+
   const b = (targetLayer.boundsNoEffects || targetLayer.bounds);
   const sourceBounds = { left: Number(b.left), top: Number(b.top), right: Number(b.right), bottom: Number(b.bottom) };
-  let imageObj; await core.executeAsModal(async () => {
-    imageObj = await imaging.getPixels({ documentID: doc.id, layerID: id, sourceBounds, colorSpace: 'RGB', componentSize: 8, includeAlpha: true, applyAlpha: true });
+  const width = Math.floor(sourceBounds.right - sourceBounds.left);
+  const height = Math.floor(sourceBounds.bottom - sourceBounds.top);
+  if (width <= 0 || height <= 0) throw new Error("图层尺寸无效");
+
+  let pixelDataBuffer;
+  await core.executeAsModal(async () => {
+    // 注意：applyAlpha: false，获取原始 RGB 值，以便我们自己处理透明像素清洗
+    const imageObj = await imaging.getPixels({
+      documentID: doc.id,
+      layerID: id,
+      sourceBounds,
+      colorSpace: 'RGB',
+      componentSize: 8,
+      includeAlpha: true,
+      applyAlpha: false
+    });
+    pixelDataBuffer = await imageObj.imageData.getData();
+    imageObj.imageData.dispose();
   }, { commandName: '获取图层像素（Imaging）' });
-  if (!imageObj || !imageObj.imageData) throw new Error('imaging.getPixels 未返回 imageData');
-  const base64Str = await imaging.encodeImageData({ imageData: imageObj.imageData, base64: true }); imageObj.imageData.dispose();
-  const tmp = await fs.getTemporaryFolder(); const fileEntry = await tmp.createFile('ps_remove_bg_input.png', { overwrite: true });
-  let ab; try { const resp = await fetch('data:image/png;base64,' + base64Str); ab = await resp.arrayBuffer(); } catch (_) { ab = base64ToArrayBuffer(base64Str); }
-  await fileEntry.write(ab, { format: uxp.storage.formats.binary });
-  const sb = imageObj.sourceBounds; const anchor = { left: Number(sb.left), top: Number(sb.top), width: Math.max(1, Number(sb.right - sb.left)), height: Math.max(1, Number(sb.bottom - sb.top)) };
+
+  if (!pixelDataBuffer) throw new Error('imaging.getPixels 未返回 imageData');
+
+  // 使用 UPNG 编码
+  const pngBuffer = encodeImageViaUPNG(pixelDataBuffer, width, height);
+
+  const tmp = await fs.getTemporaryFolder();
+  const fileEntry = await tmp.createFile('ps_remove_bg_input.png', { overwrite: true });
+  await fileEntry.write(pngBuffer, { format: uxp.storage.formats.binary });
+
+  const anchor = { left: Number(sourceBounds.left), top: Number(sourceBounds.top), width: Math.max(1, width), height: Math.max(1, height) };
   return { fileEntry, anchor };
 }
 
@@ -210,13 +296,22 @@ async function exportLayerBoundsToPNG(targetLayer) {
   const tmp = await fs.getTemporaryFolder();
   const fileEntry = await tmp.createFile('ps_remove_bg_input.png', { overwrite: true });
 
-  // 只显示目标图层（及祖先），导出合成
-  const restore = await isolateOnlyTargetVisible(targetLayer);
-  try {
-    await saveVisibleCompositeToPNG(fileEntry);
-  } finally {
-    try { await restore(); } catch(_) {}
-  }
+  // 使用 executeAsModal 包裹整个流程，确保 可见性修改 和 保存 都在一个事务中
+  await core.executeAsModal(async () => {
+    // 1. 隔离显示
+    // (将 isolateOnlyTargetVisible 的逻辑内联或确保它不再次调用 executeAsModal，
+    // 或者直接在这里手动处理可见性，为了简单起见，我们调用原逻辑，但注意嵌套问题)
+
+    // 这里简单处理：直接调用旧逻辑，因为 executeAsModal 支持嵌套
+    const restore = await isolateOnlyTargetVisible(targetLayer);
+    try {
+      // 2. 保存 (内部虽然也有 executeAsModal，但嵌套是可以的)
+      await saveVisibleCompositeToPNG(fileEntry);
+    } finally {
+      // 3. 恢复显示
+      try { await restore(); } catch (_) { }
+    }
+  }, { commandName: "LayerFlow: 导出大图(Fallback)" });
 
   const b = targetLayer.boundsNoEffects || targetLayer.bounds;
   const anchor = {
@@ -230,16 +325,16 @@ async function exportLayerBoundsToPNG(targetLayer) {
 
 /** 命名：原名_futu / _futu_2 / _futu_3 ... **/
 function computeNextRmbgName(baseName, siblingLayers) {
-  const m = (baseName||'').match(/^(.*?)(?:_futu(?:_(\d+))?)?$/i); const stem = (m && m[1].length) ? m[1] : baseName;
+  const m = (baseName || '').match(/^(.*?)(?:_futu(?:_(\d+))?)?$/i); const stem = (m && m[1].length) ? m[1] : baseName;
   const tag = stem + '_futu'; let maxN = 0; const re = new RegExp('^' + tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?:_(\\d+))?$', 'i');
-  try { for (const l of (siblingLayers||[])) { const mm = re.exec(l.name||''); if (mm) { const n = mm[1] ? parseInt(mm[1],10) : 1; if (!isNaN(n) && n > maxN) maxN = n; } } } catch (_) {}
+  try { for (const l of (siblingLayers || [])) { const mm = re.exec(l.name || ''); if (mm) { const n = mm[1] ? parseInt(mm[1], 10) : 1; if (!isNaN(n) && n > maxN) maxN = n; } } } catch (_) { }
   if (maxN <= 0) return tag; if (maxN === 1) return tag + '_2'; return tag + '_' + (maxN + 1);
 }
 
 /** Imaging 优先；失败则回退旧方案 **/
 async function getLayerInputFilePreferImaging(targetLayer) {
-  try { const r = await exportLayerViaImagingPng(targetLayer); r.via='IMAGING'; return r; }
-  catch (e) { const r2 = await exportLayerBoundsToPNG(targetLayer); r2.via='TMP'; return r2; }
+  try { const r = await exportLayerViaImagingPng(targetLayer); r.via = 'IMAGING'; return r; }
+  catch (e) { const r2 = await exportLayerBoundsToPNG(targetLayer); r2.via = 'TMP'; return r2; }
 }
 
 /** ---------- Insert result above (translate-only), then overwrite or name; rasterize if smart object ---------- **/
@@ -256,9 +351,11 @@ async function insertAndAlignResult(targetLayer, bytes, replaceOriginal, anchor)
       _obj: "placeEvent",
       null: { _path: token, _kind: "local" },
       freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSCorner0" },
-      offset: { _obj: "offset",
+      offset: {
+        _obj: "offset",
         horizontal: { _unit: "pixelsUnit", _value: 0 },
-        vertical:   { _unit: "pixelsUnit", _value: 0 } },
+        vertical: { _unit: "pixelsUnit", _value: 0 }
+      },
       linked: false
     }], { synchronousExecution: true, modalBehavior: "execute" });
 
@@ -270,7 +367,7 @@ async function insertAndAlignResult(targetLayer, bytes, replaceOriginal, anchor)
     try {
       const { ElementPlacement } = require('photoshop').constants;
       placed.move(targetLayer, ElementPlacement.PLACEBEFORE);
-    } catch (_) {}
+    } catch (_) { }
 
     // —— 对齐逻辑：按图层框架对齐到原 anchor —— 
     try {
@@ -300,7 +397,7 @@ async function insertAndAlignResult(targetLayer, bytes, replaceOriginal, anchor)
     try {
       const { RasterizeType } = require('photoshop').constants;
       await placed.rasterize(RasterizeType.ENTIRELAYER);
-    } catch (_) {}
+    } catch (_) { }
 
     const originalName = (targetLayer && targetLayer.name) || "Layer";
 
@@ -309,9 +406,9 @@ async function insertAndAlignResult(targetLayer, bytes, replaceOriginal, anchor)
       try {
         const { ElementPlacement } = require('photoshop').constants;
         placed.move(targetLayer, ElementPlacement.PLACEAFTER);
-      } catch (_) {}
-      try { placed.name = originalName; } catch (_) {}
-      try { await targetLayer.delete(); } catch (_) {}
+      } catch (_) { }
+      try { placed.name = originalName; } catch (_) { }
+      try { await targetLayer.delete(); } catch (_) { }
     } else {
       // 命名：原名_futu / _2 / _3 ...
       try {
@@ -319,7 +416,7 @@ async function insertAndAlignResult(targetLayer, bytes, replaceOriginal, anchor)
         const siblings = parent ? (parent.layers || []) : (doc.layers || []);
         const nextName = computeNextRmbgName(originalName, siblings);
         placed.name = nextName;
-      } catch (_) {}
+      } catch (_) { }
     }
   });
 }
@@ -342,13 +439,13 @@ async function loadWorkflowJSON() {
   // Prefer workflow.json; fallback to any other json (except manifest)
   const names = ["workflow.json"];
   for (const name of names) {
-    try { return JSON.parse(await (await plugin.getEntry(name)).read()); } catch (e) {}
+    try { return JSON.parse(await (await plugin.getEntry(name)).read()); } catch (e) { }
   }
   // heuristic: first .json except manifest
   const entries = await plugin.getEntries();
   for (const e of entries) {
     if (e.name.toLowerCase().endsWith(".json") && e.name !== "manifest.json") {
-      try { return JSON.parse(await e.read()); } catch (e) {}
+      try { return JSON.parse(await e.read()); } catch (e) { }
     }
   }
   throw new Error("未找到 workflow.json。请将工作流 JSON 放在插件根目录。");
@@ -362,7 +459,7 @@ function replaceImageInWorkflow(workflow, filename) {
   return JSON.parse(replaced);
 }
 
-async function waitForResult(baseURL, promptId, timeoutMs=120000) {
+async function waitForResult(baseURL, promptId, timeoutMs = 120000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     // 首先，检查历史记录中是否已有结果
@@ -373,7 +470,7 @@ async function waitForResult(baseURL, promptId, timeoutMs=120000) {
       // 尝试找到第一个 text 输出 
       for (const k of Object.keys(outputs)) {
         const nodeOutput = outputs[k];
-        
+
         // 根据我们从API获取的JSON，输出字段是 "text"，并且它是一个数组
         if (nodeOutput && nodeOutput.text && Array.isArray(nodeOutput.text) && nodeOutput.text.length > 0) {
           const base64Data = nodeOutput.text[0]; // 获取数组中的第一个元素
@@ -399,7 +496,7 @@ async function waitForResult(baseURL, promptId, timeoutMs=120000) {
       } else {
         setStatus("等待 ComfyUI 处理…");
       }
-    } catch(e) {
+    } catch (e) {
       // 如果队列检查失败，只需保持上一个消息，不要中断轮询
       console.warn("无法获取 ComfyUI 队列状态。", e);
     }
@@ -412,21 +509,21 @@ async function waitForResult(baseURL, promptId, timeoutMs=120000) {
 async function runComfyWorkflow(baseURL, fileEntry, dstName) {
   setStatus("上传输入到 ComfyUI…");
   const uploadResult = await uploadToComfy(baseURL, fileEntry, dstName);
-  
+
   // 构造正确的文件名（含子目录）
   let filename = uploadResult.name;
   if (uploadResult.subfolder) {
     filename = uploadResult.subfolder.replace(/\\/g, '/') + "/" + filename;
   }
-  
+
   setStatus("提交工作流…");
   const wf = await loadWorkflowJSON();
   const wf2 = replaceImageInWorkflow(wf, filename);
-  
-  const resp = await http(baseURL + "/prompt", { 
-      method: "POST", 
-      headers: {"Content-Type":"application/json"}, 
-      body: JSON.stringify({ prompt: wf2 })
+
+  const resp = await http(baseURL + "/prompt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt: wf2 })
   });
   const j = await resp.json();
   const promptId = j.prompt_id || j.promptId || j.id;
