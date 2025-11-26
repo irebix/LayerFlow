@@ -1,25 +1,59 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>浮图</title>
   <style>
-    body { margin: 0; padding: 10px; font-family: Arial, sans-serif; font-size: 14px; }
-    sp-button { width: 100%; height: 44px; border-radius: 22px; font-size: 16px; }
-    .switch-row { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; }
-    .switch-row sp-field-label { color: #B0B0B0; }
-    #status { margin-top: 4px; margin-bottom: 4px; font-size: 12px; color: #B0B0B0; }
-    .row { margin-top: 10px; }
-    .tip { font-size: 12px;  }
+    body {
+      margin: 0;
+      padding: 10px;
+      font-family: Arial, sans-serif;
+      font-size: 14px;
+    }
+
+    sp-button {
+      width: 100%;
+      height: 44px;
+      border-radius: 22px;
+      font-size: 16px;
+    }
+
+    .switch-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 12px;
+    }
+
+    .switch-row sp-field-label {
+      color: #B0B0B0;
+    }
+
+    #status {
+      margin-top: 4px;
+      margin-bottom: 4px;
+      font-size: 12px;
+      color: #B0B0B0;
+    }
+
+    .row {
+      margin-top: 10px;
+    }
+
+    .tip {
+      font-size: 12px;
+    }
   </style>
 </head>
+
 <body>
   <sp-button id="removeBtn" variant="cta">抠图</sp-button>
 
   <div class="switch-row">
-    <sp-field-label for="replaceCheck">覆盖原图：</sp-field-label>
-    <sp-switch id="replaceCheck" title="开：结果替换原图层；关：在上方新建图层"></sp-switch>
+    <sp-field-label for="replaceCheck">启用蒙版：</sp-field-label>
+    <sp-switch id="replaceCheck" checked title="开：结果替换原图层；关：在上方新建图层"></sp-switch>
   </div>
 
   <div id="status">就绪</div>
@@ -29,4 +63,5 @@
   <!-- 注意：不要用 type="module"，否则 require 不可用 -->
   <script src="main.js"></script>
 </body>
+
 </html>

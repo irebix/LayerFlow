@@ -1,9 +1,13 @@
 /* LayerFlow: fixed build */
 const photoshop = require('photoshop');
 const uxp = require('uxp');
-const { app, core, action } = photoshop;
+const { app, core, action, imaging } = photoshop;
 const batchPlay = action.batchPlay;
 const fs = uxp.storage.localFileSystem;
+// 引入纯 JS 解码库 (确保这俩文件在同级目录)
+// 注意：UPNG 内部会自动寻找 pako，但在 UXP 里最好显式挂载
+const pako = require("./lib/pako.min.js");
+const UPNG = require("./lib/UPNG.js");
 const { entrypoints } = uxp;
 
 /** ---------- Robust HTTP client with timeout and retry ---------- **/
@@ -53,9 +57,9 @@ function setProgress(v, msg) {
     if (typeof v === 'number') { bar.removeAttribute('indeterminate'); bar.value = Math.max(0, Math.min(100, v)); }
     else { bar.setAttribute('indeterminate', ''); }
     bar.style.display = 'block';
-    try { bar.scrollIntoView({ block: 'nearest' }); } catch (_) {}
+    try { bar.scrollIntoView({ block: 'nearest' }); } catch (_) { }
   }
-  if (btn && typeof v === 'number') { btn.textContent = `处理中 ${v|0}%…`; btn.disabled = true; }
+  if (btn && typeof v === 'number') { btn.textContent = `处理中 ${v | 0}%…`; btn.disabled = true; }
   if (typeof msg === 'string') setStatus(msg);
 }
 function endProgress(msg) {
@@ -94,7 +98,7 @@ async function getComfyBaseURL() {
       const json = JSON.parse(await cfg.read());
       if (json && json.comfyui_url) url = json.comfyui_url;
     }
-  } catch (e) {}
+  } catch (e) { }
   _cachedBaseURL = String(url).replace(/\/+$/, "");
   return _cachedBaseURL;
 }
@@ -120,19 +124,19 @@ async function isolateOnlyTargetVisible(targetLayer) {
 
   // Hide all
   for (const it of all) {
-    try { it.layer.visible = false; } catch (_) {}
+    try { it.layer.visible = false; } catch (_) { }
   }
   // Show target and all its ancestors
   let node = targetLayer;
   while (node) {
-    try { node.visible = true; } catch (_) {}
+    try { node.visible = true; } catch (_) { }
     node = node.parent;
   }
 
   // Return restore function
   return () => {
     for (const it of all) {
-      try { it.layer.visible = it.visible; } catch (_) {}
+      try { it.layer.visible = it.visible; } catch (_) { }
     }
   };
 }
@@ -158,7 +162,7 @@ async function saveVisibleCompositeToPNG(outFileEntry) {
 /** ---------- base64 -> ArrayBuffer helper ---------- **/
 function base64ToArrayBuffer(b64) {
   const binary = atob(b64); const len = binary.length; const bytes = new Uint8Array(len);
-  for (let i=0;i<len;i++) bytes[i] = binary.charCodeAt(i); return bytes.buffer;
+  for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i); return bytes.buffer;
 }
 
 /** ---------- One-step history helper (单一撤回步骤) ---------- **/
@@ -179,7 +183,7 @@ async function withSingleHistoryState(historyName, work) {
         return r;
       } catch (e) {
         // 出错则回滚，不产生历史记录项
-        try { await hostControl.resumeHistory(suspension, false); } catch(_) {}
+        try { await hostControl.resumeHistory(suspension, false); } catch (_) { }
         throw e;
       }
     },
@@ -215,7 +219,7 @@ async function exportLayerBoundsToPNG(targetLayer) {
   try {
     await saveVisibleCompositeToPNG(fileEntry);
   } finally {
-    try { await restore(); } catch(_) {}
+    try { await restore(); } catch (_) { }
   }
 
   const b = targetLayer.boundsNoEffects || targetLayer.bounds;
@@ -230,99 +234,183 @@ async function exportLayerBoundsToPNG(targetLayer) {
 
 /** 命名：原名_futu / _futu_2 / _futu_3 ... **/
 function computeNextRmbgName(baseName, siblingLayers) {
-  const m = (baseName||'').match(/^(.*?)(?:_futu(?:_(\d+))?)?$/i); const stem = (m && m[1].length) ? m[1] : baseName;
+  const m = (baseName || '').match(/^(.*?)(?:_futu(?:_(\d+))?)?$/i); const stem = (m && m[1].length) ? m[1] : baseName;
   const tag = stem + '_futu'; let maxN = 0; const re = new RegExp('^' + tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?:_(\\d+))?$', 'i');
-  try { for (const l of (siblingLayers||[])) { const mm = re.exec(l.name||''); if (mm) { const n = mm[1] ? parseInt(mm[1],10) : 1; if (!isNaN(n) && n > maxN) maxN = n; } } } catch (_) {}
+  try { for (const l of (siblingLayers || [])) { const mm = re.exec(l.name || ''); if (mm) { const n = mm[1] ? parseInt(mm[1], 10) : 1; if (!isNaN(n) && n > maxN) maxN = n; } } } catch (_) { }
   if (maxN <= 0) return tag; if (maxN === 1) return tag + '_2'; return tag + '_' + (maxN + 1);
 }
 
 /** Imaging 优先；失败则回退旧方案 **/
 async function getLayerInputFilePreferImaging(targetLayer) {
-  try { const r = await exportLayerViaImagingPng(targetLayer); r.via='IMAGING'; return r; }
-  catch (e) { const r2 = await exportLayerBoundsToPNG(targetLayer); r2.via='TMP'; return r2; }
+  try { const r = await exportLayerViaImagingPng(targetLayer); r.via = 'IMAGING'; return r; }
+  catch (e) { const r2 = await exportLayerBoundsToPNG(targetLayer); r2.via = 'TMP'; return r2; }
 }
 
-/** ---------- Insert result above (translate-only), then overwrite or name; rasterize if smart object ---------- **/
-async function insertAndAlignResult(targetLayer, bytes, replaceOriginal, anchor) {
-  const tmp = await fs.getTemporaryFolder();
-  const file = await tmp.createFile("ps_futu_result.png", { overwrite: true });
-  await file.write(bytes, { format: uxp.storage.formats.binary });
+/** 
+ * 辅助：使用 UPNG.js 纯代码解码 (方案 B - 终极稳定版)
+ * 不依赖 DOM，不依赖渲染引擎，绝无超时
+ */
+async function decodeBase64ToPixels(base64Str) {
+  const len = base64Str ? base64Str.length : 0;
 
-  const histName = replaceOriginal ? "LayerFlow：抠图（覆写）" : "LayerFlow：抠图";
+  // 1. 数据清洗与校验
+  if (len < 100) throw new Error("接收到的数据太短，非有效图片");
 
-  await withSingleHistoryState(histName, async () => {
-    const token = await fs.createSessionToken(file);
-    await batchPlay([{
-      _obj: "placeEvent",
-      null: { _path: token, _kind: "local" },
-      freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSCorner0" },
-      offset: { _obj: "offset",
-        horizontal: { _unit: "pixelsUnit", _value: 0 },
-        vertical:   { _unit: "pixelsUnit", _value: 0 } },
-      linked: false
-    }], { synchronousExecution: true, modalBehavior: "execute" });
+  // 移除 data:image 前缀
+  const raw = base64Str.replace(/^data:image\/\w+;base64,/, "").replace(/\s/g, "");
 
+  // 2. Base64 -> ArrayBuffer (复用你最稳的代码)
+  const binaryString = atob(raw);
+  const bytesLen = binaryString.length;
+  const bytes = new Uint8Array(bytesLen);
+  for (let i = 0; i < bytesLen; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+
+  // 3. UPNG 解码 (纯 CPU 运算)
+  try {
+    // UPNG.decode 接受 ArrayBuffer
+    const img = UPNG.decode(bytes.buffer);
+
+    // 转换为 RGBA 像素数据 (返回的是 Uint8Array 的数组，我们取第一帧)
+    const rgbaBuffer = UPNG.toRGBA8(img)[0];
+
+    // 转换为 Uint8ClampedArray (Canvas/Imaging API 标准格式)
+    const pixels = new Uint8ClampedArray(rgbaBuffer);
+
+    return {
+      pixels: pixels,
+      width: img.width,
+      height: img.height
+    };
+  } catch (e) {
+    console.error("[LayerFlow] UPNG 解码失败:", e);
+    throw new Error("图片解码失败，文件可能已损坏");
+  }
+}
+
+async function applySmartMask(targetLayer, base64Result, useMask = true) {
+  // 确保获取最新的 imaging 对象
+  const { imaging } = require('photoshop');
+
+  // 1. 解码数据 (得到 RGBA)
+  const { pixels, width: maskW, height: maskH } = await decodeBase64ToPixels(base64Result);
+
+  await core.executeAsModal(async (executionContext) => {
+    const { hostControl } = executionContext;
     const doc = app.activeDocument;
-    const placed = doc.activeLayers && doc.activeLayers[0];
-    if (!placed) return;
 
-    // 默认放到原图层上方（便于可视检查）；覆写时会再移动到原图层下方
+    // 开启历史记录挂起 (Single Undo Step)
+    const suspensionID = await hostControl.suspendHistory({
+      "documentID": doc.id,
+      "name": "智能遮罩合成"
+    });
+
     try {
-      const { ElementPlacement } = require('photoshop').constants;
-      placed.move(targetLayer, ElementPlacement.PLACEBEFORE);
-    } catch (_) {}
+      // 获取目标图层实际尺寸
+      const bounds = targetLayer.boundsNoEffects || targetLayer.bounds;
+      const targetW = Math.round(bounds.right - bounds.left);
+      const targetH = Math.round(bounds.bottom - bounds.top);
+      const targetLeft = Math.round(bounds.left);
+      const targetTop = Math.round(bounds.top);
 
-    // —— 对齐逻辑：按图层框架对齐到原 anchor —— 
-    try {
-      const docWidth = doc.width;
-      const docHeight = doc.height;
-      const layerWidth = anchor.width;
-      const layerHeight = anchor.height;
+      // 在原图层上操作
+      targetLayer.selected = true;
+      const finalLayer = targetLayer;
 
-      // 居中位置
-      const centeredLeft = (docWidth / 2) - (layerWidth / 2);
-      const centeredTop = (docHeight / 2) - (layerHeight / 2);
 
-      const targetLeft = (anchor && anchor.left) ? Number(anchor.left) : 0;
-      const targetTop = (anchor && anchor.top) ? Number(anchor.top) : 0;
 
-      const dx = targetLeft - centeredLeft;
-      const dy = targetTop - centeredTop;
-
-      if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
-        await placed.translate(dx, dy);
+      // ====== RGBA -> 灰度遮罩 ======
+      const srcGray = new Uint8Array(maskW * maskH);
+      for (let i = 0, j = 0; i < pixels.length; i += 4, j++) {
+        // 结果是黑白图，R=G=B，这里取 R 通道即可
+        srcGray[j] = pixels[i];
       }
-    } catch (e) {
-      console.error("LayerFlow alignment failed:", e);
+
+      // 如果尺寸不一致，先在 JS 里缩放到目标尺寸
+      let dstW = targetW;
+      let dstH = targetH;
+      let dstGray;
+
+      if (maskW === targetW && maskH === targetH) {
+        dstGray = srcGray;
+      } else {
+        dstGray = new Uint8Array(dstW * dstH);
+        const scaleX = maskW / dstW;
+        const scaleY = maskH / dstH;
+        for (let y = 0; y < dstH; y++) {
+          const srcY = Math.min(maskH - 1, Math.round((y + 0.5) * scaleY - 0.5));
+          for (let x = 0; x < dstW; x++) {
+            const srcX = Math.min(maskW - 1, Math.round((x + 0.5) * scaleX - 0.5));
+            dstGray[y * dstW + x] = srcGray[srcY * maskW + srcX];
+          }
+        }
+      }
+
+      // 确保有一张用户蒙版（已存在时可能抛错，直接忽略）
+      try {
+        await action.batchPlay([{
+          "_obj": "make",
+          "new": { "_class": "channel" },
+          "at": { "_ref": "channel", "_enum": "channel", "_value": "mask" },
+          "using": { "_enum": "userMaskEnabled", "_value": "revealAll" }
+        }], { synchronousExecution: true, modalBehavior: "execute" });
+      } catch (e) {
+        console.warn("[LayerFlow] 创建蒙版通道失败（可能已经有蒙版）：", e);
+      }
+
+      // 写入蒙版像素
+      let maskImageData;
+      try {
+        maskImageData = await imaging.createImageDataFromBuffer(dstGray, {
+          width: dstW,
+          height: dstH,
+          components: 1,
+          chunky: true,
+          colorSpace: "Grayscale",
+          colorProfile: "Gray Gamma 2.2"
+        });
+
+        await imaging.putLayerMask({
+          documentID: doc.id,
+          layerID: finalLayer.id,
+          kind: "user",
+          imageData: maskImageData,
+          replace: true,
+          targetBounds: { left: targetLeft, top: targetTop }
+        });
+      } finally {
+        if (maskImageData) {
+          maskImageData.dispose();
+        }
+      }
+
+      // 根据“使用蒙版”开关，决定是否直接应用蒙版
+      if (!useMask) {
+        try {
+          await action.batchPlay([{
+            "_obj": "delete",
+            "_target": [{ "_ref": "channel", "_enum": "channel", "_value": "mask" }],
+            "apply": true
+          }], { synchronousExecution: true, modalBehavior: "execute" });
+        } catch (e) {
+          console.warn("[LayerFlow] 应用图层蒙版失败：", e);
+        }
+      }
+
+      // 提交历史记录
+      await hostControl.resumeHistory(suspensionID, true);
+
+    } catch (err) {
+      // 发生错误，回滚历史记录
+      await hostControl.resumeHistory(suspensionID, false);
+      throw err;
     }
 
-    // 栅格化：将放置层转为像素层（去除智能对象属性）
-    try {
-      const { RasterizeType } = require('photoshop').constants;
-      await placed.rasterize(RasterizeType.ENTIRELAYER);
-    } catch (_) {}
-
-    const originalName = (targetLayer && targetLayer.name) || "Layer";
-
-    if (replaceOriginal) {
-      // 覆写：移到原图层下方，重命名为原名，删除原图层
-      try {
-        const { ElementPlacement } = require('photoshop').constants;
-        placed.move(targetLayer, ElementPlacement.PLACEAFTER);
-      } catch (_) {}
-      try { placed.name = originalName; } catch (_) {}
-      try { await targetLayer.delete(); } catch (_) {}
-    } else {
-      // 命名：原名_futu / _2 / _3 ...
-      try {
-        const parent = targetLayer && targetLayer.parent;
-        const siblings = parent ? (parent.layers || []) : (doc.layers || []);
-        const nextName = computeNextRmbgName(originalName, siblings);
-        placed.name = nextName;
-      } catch (_) {}
-    }
-  });
+  }, { commandName: "智能遮罩合成" });
 }
+
+
 
 /** ---------- ComfyUI workflow helpers ---------- **/
 
@@ -342,13 +430,13 @@ async function loadWorkflowJSON() {
   // Prefer workflow.json; fallback to any other json (except manifest)
   const names = ["workflow.json"];
   for (const name of names) {
-    try { return JSON.parse(await (await plugin.getEntry(name)).read()); } catch (e) {}
+    try { return JSON.parse(await (await plugin.getEntry(name)).read()); } catch (e) { }
   }
   // heuristic: first .json except manifest
   const entries = await plugin.getEntries();
   for (const e of entries) {
     if (e.name.toLowerCase().endsWith(".json") && e.name !== "manifest.json") {
-      try { return JSON.parse(await e.read()); } catch (e) {}
+      try { return JSON.parse(await e.read()); } catch (e) { }
     }
   }
   throw new Error("未找到 workflow.json。请将工作流 JSON 放在插件根目录。");
@@ -362,7 +450,7 @@ function replaceImageInWorkflow(workflow, filename) {
   return JSON.parse(replaced);
 }
 
-async function waitForResult(baseURL, promptId, timeoutMs=120000) {
+async function waitForResult(baseURL, promptId, timeoutMs = 120000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     // 首先，检查历史记录中是否已有结果
@@ -373,15 +461,13 @@ async function waitForResult(baseURL, promptId, timeoutMs=120000) {
       // 尝试找到第一个 text 输出 
       for (const k of Object.keys(outputs)) {
         const nodeOutput = outputs[k];
-        
+
         // 根据我们从API获取的JSON，输出字段是 "text"，并且它是一个数组
         if (nodeOutput && nodeOutput.text && Array.isArray(nodeOutput.text) && nodeOutput.text.length > 0) {
           const base64Data = nodeOutput.text[0]; // 获取数组中的第一个元素
           if (base64Data) {
-            // 使用文件中已有的工具函数将 Base64 字符串解码为 ArrayBuffer
-            const buffer = base64ToArrayBuffer(base64Data);
-            // 返回 Uint8Array，与旧代码的返回类型保持一致，以便后续流程使用
-            return new Uint8Array(buffer);
+            // 直接返回 Base64 字符串，不再转换为 ArrayBuffer
+            return base64Data;
           }
         }
       }
@@ -399,7 +485,7 @@ async function waitForResult(baseURL, promptId, timeoutMs=120000) {
       } else {
         setStatus("等待 ComfyUI 处理…");
       }
-    } catch(e) {
+    } catch (e) {
       // 如果队列检查失败，只需保持上一个消息，不要中断轮询
       console.warn("无法获取 ComfyUI 队列状态。", e);
     }
@@ -412,63 +498,82 @@ async function waitForResult(baseURL, promptId, timeoutMs=120000) {
 async function runComfyWorkflow(baseURL, fileEntry, dstName) {
   setStatus("上传输入到 ComfyUI…");
   const uploadResult = await uploadToComfy(baseURL, fileEntry, dstName);
-  
+
   // 构造正确的文件名（含子目录）
   let filename = uploadResult.name;
   if (uploadResult.subfolder) {
     filename = uploadResult.subfolder.replace(/\\/g, '/') + "/" + filename;
   }
-  
+
   setStatus("提交工作流…");
   const wf = await loadWorkflowJSON();
   const wf2 = replaceImageInWorkflow(wf, filename);
-  
-  const resp = await http(baseURL + "/prompt", { 
-      method: "POST", 
-      headers: {"Content-Type":"application/json"}, 
-      body: JSON.stringify({ prompt: wf2 })
+
+  const resp = await http(baseURL + "/prompt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt: wf2 })
   });
   const j = await resp.json();
   const promptId = j.prompt_id || j.promptId || j.id;
   if (!promptId) throw new Error("未获得 prompt_id");
 
-  const bytes = await waitForResult(baseURL, promptId);
+  const base64Str = await waitForResult(baseURL, promptId);
   setStatus("收到结果");
-  return bytes;
+  return base64Str;
 }
 
 /** ---------- UI setup & click handler ---------- **/
+let uiInited = false;
 function setupUI() {
-  const removeBtn = $("removeBtn");
-  const replaceCheck = $("replaceCheck");
+  if (uiInited) return;
+  uiInited = true;
 
-  // init switch state
-  loadSettings().then(s => { if (replaceCheck) replaceCheck.checked = !!s.replaceOriginal; });
+  const removeBtn = $("removeBtn");
+  const replaceCheck = $("replaceCheck"); // 现在表示“使用蒙版”
+
+  // init switch state（“使用蒙版”开关，默认开启）
+  loadSettings().then(s => {
+    if (!replaceCheck) return;
+    const hasUseMask = s && Object.prototype.hasOwnProperty.call(s, "useMask");
+    const useMask = hasUseMask ? !!s.useMask : true; // 默认 true
+    replaceCheck.checked = useMask;
+  });
   replaceCheck?.addEventListener("change", async () => {
-    await saveSettings({ replaceOriginal: !!replaceCheck.checked });
+    await saveSettings({ useMask: !!replaceCheck.checked });
   });
 
   removeBtn.addEventListener("click", async () => {
-    showResultTip(""); setProgress(3, "准备中…"); removeBtn.disabled = true;
+    showResultTip("");
+    setProgress(3, "准备中…");
+    removeBtn.disabled = true;
     try {
-      const doc = app.activeDocument; if (!doc) throw new Error("没有打开的文档");
-      const [targetLayer] = doc.activeLayers || []; if (!targetLayer) throw new Error("未选择图层");
+      const doc = app.activeDocument;
+      if (!doc) throw new Error("没有打开的文档");
+      const [targetLayer] = doc.activeLayers || [];
+      if (!targetLayer) throw new Error("未选择图层");
       const baseURL = await getComfyBaseURL();
 
       setProgress(12, "获取图层像素…");
       const { fileEntry, anchor } = await getLayerInputFilePreferImaging(targetLayer);
 
       setProgress(45, "上传到 ComfyUI 并执行…");
-      const resultBytes = await runComfyWorkflow(baseURL, fileEntry, 'ps_remove_bg_input.png');
+      const base64Result = await runComfyWorkflow(baseURL, fileEntry, "ps_remove_bg_input.png");
 
-      setProgress(90, "回贴结果并对齐…");
-      await insertAndAlignResult(targetLayer, resultBytes, !!(replaceCheck && replaceCheck.checked), anchor);
+      const useMask = replaceCheck ? !!replaceCheck.checked : true;
+      setProgress(90, "智能合成蒙版…");
+      await applySmartMask(targetLayer, base64Result, useMask);
 
-      endProgress("完成"); showResultTip("已插入抠图结果");
+      endProgress("完成");
+      showResultTip("已插入抠图结果");
     } catch (err) {
       console.error("[浮图] 错误：", err);
       endProgress("出错");
       showResultTip((err && err.message) ? err.message : String(err));
-    } finally { removeBtn.disabled = false; }
+    } finally {
+      removeBtn.disabled = false;
+    }
   });
 }
+
+

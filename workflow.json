@@ -5,7 +5,7 @@
       "mask_blur": 0,
       "mask_offset": 0,
       "background": "Alpha",
-      "invert_output": true,
+      "invert_output": false,
       "refine_foreground": false,
       "image": [
         "4",
@@ -26,26 +26,10 @@
       "title": "加载图像"
     }
   },
-  "5": {
-    "inputs": {
-      "image": [
-        "1",
-        0
-      ],
-      "alpha": [
-        "1",
-        1
-      ]
-    },
-    "class_type": "JoinImageWithAlpha",
-    "_meta": {
-      "title": "合并图像Alpha"
-    }
-  },
   "6": {
     "inputs": {
       "image": [
-        "5",
+        "10",
         0
       ]
     },
@@ -64,6 +48,138 @@
     "class_type": "easy showAnything",
     "_meta": {
       "title": "展示任何"
+    }
+  },
+  "9": {
+    "inputs": {
+      "mode": "combine",
+      "mask_1": [
+        "4",
+        1
+      ],
+      "mask_2": [
+        "1",
+        1
+      ]
+    },
+    "class_type": "AILab_MaskCombiner",
+    "_meta": {
+      "title": "遮罩组合 (RMBG)"
+    }
+  },
+  "10": {
+    "inputs": {
+      "mask": [
+        "38",
+        0
+      ]
+    },
+    "class_type": "MaskToImage",
+    "_meta": {
+      "title": "遮罩转换为图像"
+    }
+  },
+  "15": {
+    "inputs": {
+      "mask": [
+        "4",
+        1
+      ]
+    },
+    "class_type": "MaskToImage",
+    "_meta": {
+      "title": "遮罩转换为图像"
+    }
+  },
+  "23": {
+    "inputs": {
+      "value": 64
+    },
+    "class_type": "Int-🔬",
+    "_meta": {
+      "title": "Int"
+    }
+  },
+  "24": {
+    "inputs": {
+      "comparison": "a == b",
+      "a": [
+        "35",
+        0
+      ],
+      "b": [
+        "23",
+        0
+      ]
+    },
+    "class_type": "easy compare",
+    "_meta": {
+      "title": "比较"
+    }
+  },
+  "27": {
+    "inputs": {
+      "comparison": "a == b",
+      "a": [
+        "35",
+        1
+      ],
+      "b": [
+        "23",
+        0
+      ]
+    },
+    "class_type": "easy compare",
+    "_meta": {
+      "title": "比较"
+    }
+  },
+  "32": {
+    "inputs": {
+      "boolean_a": [
+        "24",
+        0
+      ],
+      "boolean_b": [
+        "27",
+        0
+      ]
+    },
+    "class_type": "Logic Comparison AND",
+    "_meta": {
+      "title": "Logic Comparison AND"
+    }
+  },
+  "35": {
+    "inputs": {
+      "image": [
+        "15",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "Get Image Size"
+    }
+  },
+  "38": {
+    "inputs": {
+      "boolean": [
+        "32",
+        0
+      ],
+      "on_true": [
+        "1",
+        1
+      ],
+      "on_false": [
+        "9",
+        0
+      ]
+    },
+    "class_type": "easy ifElse",
+    "_meta": {
+      "title": "是否判断"
     }
   }
 }
