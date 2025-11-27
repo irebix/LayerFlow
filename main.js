@@ -353,7 +353,7 @@ async function applySmartMask(targetLayer, base64Result, useMask = true) {
           "_obj": "make",
           "new": { "_class": "channel" },
           "at": { "_ref": "channel", "_enum": "channel", "_value": "mask" },
-          "using": { "_enum": "userMaskEnabled", "_value": "revealAll" }
+          "using": { "_enum": "userMaskEnabled", "_value": "hideAll" }
         }], { synchronousExecution: true, modalBehavior: "execute" });
       } catch (e) {
         console.warn("[LayerFlow] 创建蒙版通道失败（可能已经有蒙版）：", e);
