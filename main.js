@@ -18,7 +18,12 @@ async function http(url, opts = {}, tries = 3, timeoutMs = 15000) {
     try {
       const resp = await fetch(url, Object.assign({}, opts, { signal: ctrl.signal }));
       clearTimeout(t);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      if (!resp.ok) {
+        let detail = "";
+        try { detail = await resp.text(); } catch (_) { }
+        if (detail && detail.length > 600) detail = detail.slice(0, 600) + "...";
+        throw new Error(detail ? `HTTP ${resp.status}: ${detail}` : `HTTP ${resp.status}`);
+      }
       return resp;
     } catch (e) {
       clearTimeout(t);
