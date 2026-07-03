@@ -91,15 +91,6 @@
       "title": "遮罩转换为图像"
     }
   },
-  "23": {
-    "inputs": {
-      "value": 64
-    },
-    "class_type": "Int-🔬",
-    "_meta": {
-      "title": "Int"
-    }
-  },
   "24": {
     "inputs": {
       "comparison": "a == b",
